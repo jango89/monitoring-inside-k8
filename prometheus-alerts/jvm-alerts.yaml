@@ -1,0 +1,12 @@
+"groups":
+  - "name": "jvm-alerting"
+    "rules":
+    - "alert": "heap-usage-too-much"
+      "expr": |
+        jvm_memory_bytes_used / jvm_memory_bytes_max * 100 > 80
+      "for": "1m"
+      "labels":
+        "severity": "red"
+      "annotations":
+        "summary": "JVM Instance {{ $labels.instance }} memory usage > 80%"
+        "description": "{{ $labels.instance }} of job {{ $labels.job }} has been in status [heap usage > 80%] for more than 1 minutes. current usage ({{ $value }}%)"
