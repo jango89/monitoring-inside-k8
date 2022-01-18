@@ -1,0 +1,787 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: alertmanager
+---
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: corefin-cluster-monitoring-alertmanager-operated
+  labels:
+    app.kubernetes.io/name: corefin-cluster-monitoring
+    app.kubernetes.io/component: alertmanager
+spec:
+  type: "ClusterIP"
+  clusterIP: None
+  selector:
+    k8s-app: alertmanager
+  ports:
+    - name: mesh
+      # Exposes port 6783 at a cluster-internal IP address
+      port: 6783
+      protocol: TCP
+      # Routes requests to port 6783 of the Alertmanager StatefulSet Pods
+      targetPort: 6783
+    - name: http
+      port: 9093
+      protocol: TCP
+      targetPort: 9093
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: corefin-cluster-monitoring-alertmanager
+  labels:
+    k8s-app: alertmanager
+    app.kubernetes.io/name: corefin-cluster-monitoring
+    app.kubernetes.io/component: alertmanager
+spec:
+  ports:
+    - name: http
+      # Exposes port 9093 at a cluster-internal IP address
+      port: 9093
+      protocol: TCP
+      # Routes requests to port 9093 of the Alertmanager StatefulSet Pods
+      targetPort: 9093
+  selector:
+    k8s-app: alertmanager
+  type: "ClusterIP"
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: corefin-cluster-monitoring-alertmanager
+  labels: &Labels
+    k8s-app: alertmanager
+    app.kubernetes.io/name: corefin-cluster-monitoring
+    app.kubernetes.io/component: alertmanager
+spec:
+  # Used to configure a stable network identity for the StatefulSet Pods
+  # e.g. pod_name.corefin-cluster-monitoring-alertmanager-operated.${MONITORING_NAMESPACE}.svc:6783
+  serviceName: "corefin-cluster-monitoring-alertmanager-operated"
+  # To scale the number of Alertmanager replicas, you must add `—cluster.peer` addresses
+  # for any additional Alertmanager Pods in the `args` section of the `containers` spec.
+  replicas: ${ALERT_MANAGER_REPLICAS}
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels: *Labels
+  template:
+    metadata:
+      labels: *Labels
+    spec:
+      serviceAccountName: alertmanager
+      containers:
+        - name: prometheus-alertmanager
+          # The Alertmanager container image
+          image: quay.io/prometheus/alertmanager:v0.16.0
+          imagePullPolicy: Always
+          args:
+            - --config.file=/etc/config/alertmanager.yml
+            - --storage.path=/data
+            - --web.listen-address=:9093
+            - --web.route-prefix=/
+            - --cluster.listen-address=$(POD_IP):6783
+            - --cluster.peer=corefin-cluster-monitoring-alertmanager-0.corefin-cluster-monitoring-alertmanager-operated.${MONITORING_NAMESPACE}.svc:6783
+            - --cluster.peer=corefin-cluster-monitoring-alertmanager-1.corefin-cluster-monitoring-alertmanager-operated.${MONITORING_NAMESPACE}.svc:6783
+            - --log.level=debug
+          env:
+          - name: POD_IP
+            valueFrom:
+              fieldRef:
+                apiVersion: v1
+                fieldPath: status.podIP
+          ports:
+            # Configured for web access
+            - containerPort: 9093
+              name: http
+            # Configured for communication over the mesh
+            - containerPort: 6783
+              name: mesh
+          readinessProbe:
+            httpGet:
+              path: /#/status
+              port: 9093
+            initialDelaySeconds: 30
+            timeoutSeconds: 30
+          volumeMounts:
+            # The ConfigMap containing `alertmanager.yml` will be mounted to `/etc/config`, using a Kubernetes Volume.
+            # To learn more about mounting ConfigMap data into a Volume,
+            # consult https://kubernetes.io/docs/tasks/configure-pod-container/configure-pod-configmap/#populate-a-volume-with-data-stored-in-a-configmap
+            - name: config-volume
+              mountPath: /etc/config
+            - name: corefin-cluster-monitoring-alertmanager-data
+              mountPath: "/data"
+              subPath: ""
+          resources:
+            # Resource limits of 50 MiB of memory and 10m of CPU.
+            # To learn more about resource limits and requests, and how to tune them,
+            # consult https://kubernetes.io/docs/concepts/configuration/manage-compute-resources-container
+            limits:
+              cpu: 10m
+              memory: 50Mi
+            requests:
+              cpu: 10m
+              memory: 50Mi
+      volumes:
+        - name: config-volume
+          configMap:
+            name: corefin-cluster-monitoring-alertmanager-config
+      # Configures Pod anti-affinity so that Alertmanager Pods are assigned to different Nodes.
+      # To learn more about Pod affinity and anti-affinity, consult https://kubernetes.io/docs/concepts/configuration/assign-pod-node/
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: k8s-app
+                operator: In
+                values:
+                - alertmanager
+            topologyKey: "kubernetes.io/hostname"
+  # Attach `2Gi` of DigitalOcean Block Storage to each Alertmanager Pod.
+  # This volume will be attached at the `/data` path and will be used to store Alertmanager data.
+  # To learn more about `volumeClaimTemplate`, consult https://kubernetes.io/docs/concepts/workloads/controllers/statefulset/#stable-storage
+  volumeClaimTemplates:
+  - metadata:
+      name: corefin-cluster-monitoring-alertmanager-data
+    spec:
+      storageClassName: do-block-storage
+      accessModes:
+        - ReadWriteOnce
+      resources:
+        requests:
+          storage: "${ALERT_MANAGER_POD_VOLUME}"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: grafana
+---
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: corefin-cluster-monitoring-grafana-ini
+  labels:
+    app.kubernetes.io/name: corefin-cluster-monitoring
+    app.kubernetes.io/component: grafana
+data:
+  # Grafana's main configuration file. To learn more about the configuration options available to you,
+  # consult https://grafana.com/docs/installation/configuration
+  grafana.ini: |
+    [analytics]
+    check_for_updates = true
+    [grafana_net]
+    url = https://grafana.net
+    [log]
+    mode = console
+    [paths]
+    data = /var/lib/grafana/data
+    logs = /var/log/grafana
+    plugins = /var/lib/grafana/plugins
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: corefin-cluster-monitoring-grafana-datasources
+  labels:
+    app.kubernetes.io/name: corefin-cluster-monitoring
+data:
+  # A file that specifies data sources for Grafana to use to populate dashboards.
+  # To learn more about configuring this, consult https://grafana.com/docs/administration/provisioning/#datasources
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+    - access: proxy
+      isDefault: true
+      name: prometheus
+      type: prometheus
+      url: http://corefin-cluster-monitoring-prometheus:9090
+      version: 1
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: corefin-cluster-monitoring-grafana-dashboardproviders
+  labels:
+    app.kubernetes.io/name: corefin-cluster-monitoring
+data:
+  # A file that configures where Grafana should look for dashboards to load when starting up.
+  # To learn more, consult https://grafana.com/docs/administration/provisioning/#dashboards
+  # By default, the `dashboards-configmap.yaml` ConfigMap will be mounted to `/var/lib/grafana/dashboards` which is referenced in this file.
+  dashboardproviders.yaml: |
+    apiVersion: 1
+    providers:
+    - disableDeletion: false
+      editable: true
+      folder: ""
+      name: default
+      options:
+        path: /var/lib/grafana/dashboards
+      orgId: 1
+      type: file
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: corefin-cluster-monitoring-grafana
+  labels:
+    app.kubernetes.io/name: corefin-cluster-monitoring
+    app.kubernetes.io/component: grafana
+type: Opaque
+data:
+  admin-user: Y29yZWZpbi1hZG1pbg==
+  admin-password: ${GRAFANA_PASSWORD}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: corefin-cluster-monitoring-grafana
+  labels:
+    k8s-app: grafana
+    app.kubernetes.io/name: corefin-cluster-monitoring
+    app.kubernetes.io/component: grafana
+spec:
+  ports:
+    # Routes port 80 to port 3000 of the Grafana StatefulSet Pods
+    - name: http
+      port: 80
+      protocol: TCP
+      targetPort: 3000
+  selector:
+    k8s-app: grafana
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: corefin-cluster-monitoring-grafana
+  labels: &Labels
+    k8s-app: grafana
+    app.kubernetes.io/name: corefin-cluster-monitoring
+    app.kubernetes.io/component: grafana
+spec:
+  serviceName: corefin-cluster-monitoring-grafana
+  replicas: 1
+  selector:
+    matchLabels: *Labels
+  template:
+    metadata:
+      labels: *Labels
+    spec:
+      serviceAccountName: grafana
+      # Configure an init container that will `chmod 777` Grafana's data directory
+      # and volume before the main Grafana container starts up.
+      # To learn more about init containers, consult https://kubernetes.io/docs/concepts/workloads/pods/init-containers/
+      # from the official Kubernetes docs.
+      initContainers:
+          - name: "init-chmod-data"
+            image: debian:9
+            imagePullPolicy: "IfNotPresent"
+            command: ["chmod", "777", "/var/lib/grafana"]
+            volumeMounts:
+            - name: corefin-cluster-monitoring-grafana-data
+              mountPath: "/var/lib/grafana"
+      containers:
+        - name: grafana
+          # The main Grafana container, which uses the `grafana/grafana:6.0.1` image
+          # from https://hub.docker.com/r/grafana/grafana
+          image: grafana/grafana:6.0.1
+          imagePullPolicy: Always
+          # Mount in all the previously defined ConfigMaps as `volumeMounts`
+          # as well as the Grafana data volume
+          volumeMounts:
+            - name: config
+              mountPath: "/etc/grafana/"
+            - name: dashboards
+              mountPath: "/var/lib/grafana/dashboards/"
+            - name: datasources
+              mountPath: "/etc/grafana/provisioning/datasources/"
+            - name: dashboardproviders
+              mountPath: "/etc/grafana/provisioning/dashboards/"
+            - name: corefin-cluster-monitoring-grafana-data
+              mountPath: "/var/lib/grafana"
+          ports:
+            - name: service
+              containerPort: 443
+              protocol: TCP
+            - name: grafana
+              containerPort: 3000
+              protocol: TCP
+          # Set the `GF_SECURITY_ADMIN_USER` and `GF_SECURITY_ADMIN_PASSWORD` environment variables
+          # using the Secret defined in `grafana-secret.yaml`
+          env:
+            - name: GF_SECURITY_ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: corefin-cluster-monitoring-grafana
+                  key: admin-user
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: corefin-cluster-monitoring-grafana
+                  key: admin-password
+          # Define a liveness and readiness probe that will hit `/api/health` using port `3000`.
+          # To learn more about Liveness and Readiness Probes,
+          # consult https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-probes/
+          # from the official Kubernetes docs.
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 60
+            timeoutSeconds: 30
+            failureThreshold: 10
+            periodSeconds: 10
+          # Define resource limits and requests of `50m` of CPU and `100Mi` of memory.
+          resources:
+            limits:
+              cpu: 50m
+              memory: 100Mi
+            requests:
+              cpu: 50m
+              memory: 100Mi
+      # Define `configMap` volumes for the above ConfigMap files, and `volumeClaimTemplates`
+      # for Grafana's `2Gi` Block Storage data volume, which will be mounted to `/var/lib/grafana`.
+      volumes:
+        - name: config
+          configMap:
+            name: corefin-cluster-monitoring-grafana-ini
+        - name: datasources
+          configMap:
+            name: corefin-cluster-monitoring-grafana-datasources
+        - name: dashboardproviders
+          configMap:
+            name: corefin-cluster-monitoring-grafana-dashboardproviders
+        - name: dashboards
+          configMap:
+            name: corefin-cluster-monitoring-dashboards
+  volumeClaimTemplates:
+  - metadata:
+      name: corefin-cluster-monitoring-grafana-data
+    spec:
+      storageClassName: do-block-storage
+      accessModes:
+        - ReadWriteOnce
+      resources:
+        requests:
+          storage: "${GRAFANA_POD_VOLUME}"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kube-state-metrics
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kube-state-metrics
+# Grants the kube-state-metrics Service Account the appropriate `list` and `watch`
+# permissions so that it can generate metrics about the state of objects in the cluster.
+rules:
+- apiGroups: [""]
+  resources:
+  - configmaps
+  - secrets
+  - nodes
+  - pods
+  - services
+  - resourcequotas
+  - replicationcontrollers
+  - limitranges
+  - persistentvolumeclaims
+  - persistentvolumes
+  - namespaces
+  - endpoints
+  verbs: ["list", "watch"]
+- apiGroups: ["extensions"]
+  resources:
+  - daemonsets
+  - deployments
+  - replicasets
+  verbs: ["list", "watch"]
+- apiGroups: ["apps"]
+  resources:
+  - statefulsets
+  verbs: ["list", "watch"]
+- apiGroups: ["batch"]
+  resources:
+  - cronjobs
+  - jobs
+  verbs: ["list", "watch"]
+- apiGroups: ["autoscaling"]
+  resources:
+  - horizontalpodautoscalers
+  verbs: ["list", "watch"]
+---
+# Binds the ClusterRole to the `kube-state-metrics` Service Account,
+# granting it the permissions defined in the `ClusterRole`.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kube-state-metrics
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kube-state-metrics
+subjects:
+- kind: ServiceAccount
+  name: kube-state-metrics
+  namespace: ${MONITORING_NAMESPACE}
+---
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: corefin-cluster-monitoring-kube-state-metrics
+  labels:
+    k8s-app: kube-state-metrics
+    app.kubernetes.io/name: corefin-cluster-monitoring
+    app.kubernetes.io/component: kube-state-metrics
+spec:
+  selector:
+    matchLabels:
+      k8s-app: kube-state-metrics
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        k8s-app: kube-state-metrics
+    spec:
+      serviceAccountName: kube-state-metrics
+      containers:
+      - name: kube-state-metrics
+        # Use the `quay.io/coreos/kube-state-metrics:v1.5.0` container image
+        image: quay.io/coreos/kube-state-metrics:v1.5.0
+        imagePullPolicy: Always
+        ports:
+        # `8080` is used to scrape Kubernetes object state metrics
+        - name: http-metrics
+          containerPort: 8080
+        # `8081` to scrape its own general process metrics
+        - name: telemetry
+          containerPort: 8081
+        # A readiness probe is configured to hit `/healthz` at `8080`
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 5
+          timeoutSeconds: 5
+      # Watch the `kube-state-metrics` Pod's resource usage, and dynamically scale the Deployment as necessary.
+      # To learn more, you can consult the `README` from https://github.com/kubernetes/autoscaler/tree/master/addon-resizer
+      - name: addon-resizer
+        image: k8s.gcr.io/addon-resizer:1.7
+        resources:
+          limits:
+            cpu: 100m
+            memory: 30Mi
+          requests:
+            cpu: 100m
+            memory: 30Mi
+        env:
+          - name: MY_POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+          - name: MY_POD_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+        command:
+          - /pod_nanny
+          - --container=kube-state-metrics
+          - --cpu=100m
+          - --extra-cpu=1m
+          - --memory=100Mi
+          - --extra-memory=2Mi
+          - --threshold=5
+          - --deployment=corefin-cluster-monitoring-kube-state-metrics
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: corefin-cluster-monitoring-kube-state-metrics
+  labels:
+    k8s-app: kube-state-metrics
+    app.kubernetes.io/name: corefin-cluster-monitoring
+    app.kubernetes.io/component: kube-state-metrics
+spec:
+  ports:
+  # Exposed using the default ClusterIP service type
+  - name: http-metrics
+    port: 8080
+    targetPort: http-metrics
+    protocol: TCP
+  - name: telemetry
+    port: 8081
+    targetPort: telemetry
+    protocol: TCP
+  selector:
+    k8s-app: kube-state-metrics
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: node-exporter
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: corefin-cluster-monitoring-node-exporter
+  labels:
+    k8s-app: node-exporter
+    app.kubernetes.io/name: corefin-cluster-monitoring
+    app.kubernetes.io/component: node-exporter
+spec:
+  updateStrategy:
+    type: OnDelete
+  selector:
+    matchLabels:
+      k8s-app: node-exporter
+  template:
+    metadata:
+      labels:
+        k8s-app: node-exporter
+    spec:
+      serviceAccountName: node-exporter
+      containers:
+        - name: prometheus-node-exporter
+          # Use the `quay.io/prometheus/node-exporter:v0.17.0` image
+          image: quay.io/prometheus/node-exporter:v0.17.0
+          imagePullPolicy: Always
+          args:
+            - --path.procfs=/host/proc
+            - --path.sysfs=/host/sys
+          ports:
+            # Expose metrics for scraping on port `9100`
+            - name: metrics
+              containerPort: 9100
+              hostPort: 9100
+          # The `proc` and `sys` Node paths are mounted into the Pod at `/host/proc` and `/host/sys` respectively.
+          # To learn more about `proc` and `sys`, pseudo file systems that are used to provide information about the Node,
+          # consult http://www.tldp.org/LDP/Linux-Filesystem-Hierarchy/html/proc.html from the Linux Documentation Project
+          # and https://www.kernel.org/doc/Documentation/filesystems/sysfs.txt from the Linux Kernel's documentation.
+          volumeMounts:
+            - name: proc
+              mountPath: /host/proc
+              readOnly:  true
+            - name: sys
+              mountPath: /host/sys
+              readOnly: true
+          # Resource limits and requests of `10m` of CPU and `50Mi` of memory
+          resources:
+            limits:
+              cpu: 10m
+              memory: 50Mi
+            requests:
+              cpu: 10m
+              memory: 50Mi
+      # The `hostNetwork` and `hostPID` Pod Security parameters are set to `true` to allow `node-exporter`
+      # to  access the host process ID namespace and Node network namespace, which are required for scraping Node metrics
+      hostNetwork: true
+      hostPID: true
+      volumes:
+        - name: proc
+          hostPath:
+            path: /proc
+        - name: sys
+          hostPath:
+            path: /sys
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+---
+# The ClusterRole grants the Prometheus Service Account permissions to fetch Kubernetes Node information,
+# as well as information about Services, Endpoints, and Pods in the cluster.
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRole
+metadata:
+  name: prometheus
+rules:
+- apiGroups: [""]
+  resources:
+  - nodes
+  - nodes/metrics
+  - services
+  - endpoints
+  - pods
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get"]
+- nonResourceURLs: ["/metrics", "/metrics/cadvisor"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus
+subjects:
+- kind: ServiceAccount
+  name: prometheus
+  namespace: ${MONITORING_NAMESPACE}
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: corefin-cluster-monitoring-prometheus
+  labels:
+    k8s-app: prometheus
+    app.kubernetes.io/name: corefin-cluster-monitoring
+    app.kubernetes.io/component: prometheus
+spec:
+  ports:
+    # Exposes `http` and `TCP` ports `9090` using the default `ClusterIP` Service type
+    - name: http
+      port: 9090
+      protocol: TCP
+      targetPort: 9090
+  # Ensures clients are routed to the same Prometheus Pod, which is necessary to get consistent dashboards in a highly-available setup.
+  # To learn more about Prometheus high availability,
+  # consult https://github.com/coreos/prometheus-operator/blob/master/Documentation/high-availability.md#prometheus
+  sessionAffinity: ClientIP
+  selector:
+    k8s-app: prometheus
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: corefin-cluster-monitoring-prometheus
+  labels: &Labels
+    k8s-app: prometheus
+    app.kubernetes.io/name: corefin-cluster-monitoring
+    app.kubernetes.io/component: prometheus
+spec:
+  serviceName: "corefin-cluster-monitoring-prometheus"
+  replicas: ${PROMETHEUS_SERVER_REPLICAS}
+  podManagementPolicy: "Parallel"
+  updateStrategy:
+    type: "RollingUpdate"
+  selector:
+    matchLabels: *Labels
+  template:
+    metadata:
+      labels: *Labels
+    spec:
+      serviceAccountName: prometheus
+      # `chown` the Prometheus  `/data` directory so that Prometheus can write to it
+      initContainers:
+      - name: "init-chown-data"
+        image: debian:9
+        imagePullPolicy: Always
+        command: ["chown", "-R", "65534:65534", "/data"]
+        volumeMounts:
+        - name: corefin-cluster-monitoring-prometheus-data
+          mountPath: /data
+          subPath: ""
+      containers:
+        - name: prometheus-server
+          # Use the `quay.io/prometheus/prometheus:v2.11.1` image
+          image: quay.io/prometheus/prometheus:v2.11.1
+          imagePullPolicy: "IfNotPresent"
+          args:
+            - --config.file=/etc/config/prometheus.yaml
+            - --storage.tsdb.path=/data
+            - --storage.tsdb.retention.time=${DATA_RETENTIONS_PERIOD}
+            - --web.console.libraries=/etc/prometheus/console_libraries
+            - --web.console.templates=/etc/prometheus/consoles
+            - --web.enable-lifecycle
+          ports:
+            - containerPort: 9090
+          # Probe the `/-/ready` and `/-/healthy` endpoints
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: 9090
+            initialDelaySeconds: 30
+            timeoutSeconds: 30
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: 9090
+            initialDelaySeconds: 30
+            timeoutSeconds: 30
+          # Based on 10 running nodes with 30 pods each
+          # Resource requests of `200m` of CPU and `1000Mi` of memory
+          resources:
+            requests:
+              cpu: 200m
+              memory: 1000Mi
+          volumeMounts:
+            - name: config-volume
+              mountPath: /etc/config
+            - name: corefin-cluster-monitoring-prometheus-data
+              mountPath: /data
+              subPath: ""
+      terminationGracePeriodSeconds: 300
+      volumes:
+        # The Prometheus ConfigMap is mounted into the Pods as a volume at `/etc/config`
+        - name: config-volume
+          configMap:
+            name: corefin-cluster-monitoring-prometheus-config
+      # Configures Pod anti-affinity so that Prometheus Pods are assigned to different Nodes.
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: k8s-app
+                operator: In
+                values:
+                - prometheus
+            topologyKey: "kubernetes.io/hostname"
+  # A `volumeClaimTemplate` of `16Gi` of Block Storage is configured and used for Prometheus data storage, mounted at `/data/`
+  volumeClaimTemplates:
+  - metadata:
+      name: corefin-cluster-monitoring-prometheus-data
+      labels: *Labels
+    spec:
+      storageClassName: do-block-storage
+      accessModes:
+        - ReadWriteOnce
+      resources:
+        requests:
+          storage: "${PROMETHEUS_SERVER_POD_VOLUME}"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysqld-exporter
+spec:
+  selector:
+    matchLabels:
+      app: mysqld-exporter
+  replicas: 1
+  template:
+    metadata:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9104"
+      labels:
+        app: mysqld-exporter
+    spec:
+      containers:
+        - name: mysqld-exporter
+          image: prom/mysqld-exporter:v0.11.0
+          env:
+            - name: DATA_SOURCE_NAME
+              value: doadmin:${DO_MYSQL_DB_PASSWORD}@($DO_MYSQL_URL)/
+          ports:
+            - containerPort: 9104
+---
