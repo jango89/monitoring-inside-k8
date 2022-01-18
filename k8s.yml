@@ -401,6 +401,7 @@ rules:
   - persistentvolumeclaims
   - persistentvolumes
   - namespaces
+  - deployments
   - endpoints
   verbs: ["list", "watch"]
 - apiGroups: ["extensions"]
@@ -408,10 +409,14 @@ rules:
   - daemonsets
   - deployments
   - replicasets
+  - ingresses
   verbs: ["list", "watch"]
 - apiGroups: ["apps"]
   resources:
   - statefulsets
+  - deployments
+  - replicasets
+  - daemonsets
   verbs: ["list", "watch"]
 - apiGroups: ["batch"]
   resources:
@@ -421,6 +426,16 @@ rules:
 - apiGroups: ["autoscaling"]
   resources:
   - horizontalpodautoscalers
+  verbs: ["list", "watch"]
+- apiGroups: ["networking.k8s.io"]
+  resources:
+    - ingresses
+    - networkpolicies
+  verbs: ["list", "watch"]
+- apiGroups: ["storage.k8s.io"]
+  resources:
+    - storageclasses
+    - volumeattachments
   verbs: ["list", "watch"]
 ---
 # Binds the ClusterRole to the `kube-state-metrics` Service Account,
@@ -460,8 +475,7 @@ spec:
       serviceAccountName: kube-state-metrics
       containers:
       - name: kube-state-metrics
-        # Use the `quay.io/coreos/kube-state-metrics:v1.5.0` container image
-        image: quay.io/coreos/kube-state-metrics:v1.5.0
+        image: quay.io/coreos/kube-state-metrics:v2.0.0-rc.0
         imagePullPolicy: Always
         ports:
         # `8080` is used to scrape Kubernetes object state metrics
@@ -556,8 +570,7 @@ spec:
       serviceAccountName: node-exporter
       containers:
         - name: prometheus-node-exporter
-          # Use the `quay.io/prometheus/node-exporter:v0.17.0` image
-          image: quay.io/prometheus/node-exporter:v0.17.0
+          image: quay.io/prometheus/node-exporter:v1.3.1
           imagePullPolicy: Always
           args:
             - --path.procfs=/host/proc
@@ -692,8 +705,7 @@ spec:
           subPath: ""
       containers:
         - name: prometheus-server
-          # Use the `quay.io/prometheus/prometheus:v2.11.1` image
-          image: quay.io/prometheus/prometheus:v2.11.1
+          image: quay.io/prometheus/prometheus:v2.32.1
           imagePullPolicy: "IfNotPresent"
           args:
             - --config.file=/etc/config/prometheus.yaml
