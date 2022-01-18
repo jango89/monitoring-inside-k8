@@ -1,0 +1,113 @@
+version: 2.1
+
+jobs:
+  build:
+    docker:
+      - image: cimg/base:stable
+    working_directory: ~/repo
+    steps:
+      - checkout
+      - persist_to_workspace:
+          root: ~/repo
+          paths:
+            - k8s.yml
+            - prometheus.yaml
+            - alertmanager
+            - prometheus-alerts
+            - grafana-dashboards
+
+  deploy:
+    docker:
+      - image: roffe/kubectl
+    shell: /usr/local/bin/bash
+    working_directory: ~/repo
+    parameters:
+      kubeconfig-env-var:
+        type: string
+      app-profile:
+        type: string
+      prometheus-server-pod-volume:
+        type: string
+      alert-manager-pod-volume:
+        type: string
+      grafana-server-pod-volume:
+        type: string
+      data-retention-period:
+        type: string
+      prometheus-replicas:
+        type: string
+      alert-manager-replicas:
+        type: string
+      namespace:
+        type: string
+      alertmanager-yml:
+        type: string
+      mysql_db_password_env_variable:
+        type: string
+      mysql_url_env_variable:
+        type: string
+    steps:
+      - attach_workspace:
+          at: ~/repo
+      - run: |
+        #          TODO set k8 context.
+      - run:
+          name: Deploying...
+          command: |
+            echo "export MONITORING_NAMESPACE=<< parameters.namespace >>" >> $BASH_ENV
+            echo "export PROMETHEUS_SERVER_POD_VOLUME=<< parameters.prometheus-server-pod-volume >>" >> $BASH_ENV
+            echo "export ALERT_MANAGER_POD_VOLUME=<< parameters.alert-manager-pod-volume >>" >> $BASH_ENV
+            echo "export GRAFANA_POD_VOLUME=<< parameters.grafana-server-pod-volume >>" >> $BASH_ENV
+            echo "export DATA_RETENTIONS_PERIOD=<< parameters.data-retention-period >>" >> $BASH_ENV
+            echo "export PROMETHEUS_SERVER_REPLICAS=<< parameters.prometheus-replicas >>" >> $BASH_ENV
+            echo "export ALERT_MANAGER_REPLICAS=<< parameters.alert-manager-replicas >>" >> $BASH_ENV
+            echo "export DO_MYSQL_DB_PASSWORD=$<< parameters.mysql_db_password_env_variable >>" >> $BASH_ENV
+            echo "export DO_MYSQL_URL=$<< parameters.mysql_url_env_variable >>" >> $BASH_ENV
+            source $BASH_ENV
+            kubectl create namespace << parameters.namespace >> --dry-run -o yaml | kubectl apply -f -
+            kubectl create configmap cluster-monitoring-prometheus-config --from-file=prometheus.yaml=prometheus.yaml --from-file=prometheus-alerts  --namespace << parameters.namespace >> -o yaml --dry-run | kubectl apply -f -
+            kubectl create configmap cluster-monitoring-dashboards --from-file=grafana-dashboards --namespace << parameters.namespace >> -o yaml --dry-run | kubectl apply -f -
+            kubectl create configmap cluster-monitoring-alertmanager-config --from-file=alertmanager.yml=<< parameters.alertmanager-yml >> --namespace << parameters.namespace >> -o yaml --dry-run | kubectl apply -f -
+            cat k8s.yml | envsubst | kubectl apply --namespace << parameters.namespace >> -f -
+
+workflows:
+  buildanddeploy:
+    jobs:
+      - build
+      - approve-prod-deploy:
+          type: approval
+      - deploy:
+          name: deploy-staging
+          kubeconfig-env-var: STAGING_KUBE_CONFIG
+          app-profile: staging
+          context:
+          namespace: monitoring-v1
+          alertmanager-yml: "alertmanager/am-staging.yml"
+          alert-manager-pod-volume: "1Gi"
+          prometheus-server-pod-volume: "1Gi"
+          grafana-server-pod-volume: "1Gi"
+          data-retention-period: "5d"
+          prometheus-replicas: "1"
+          alert-manager-replicas: "1"
+          mysql_url_env_variable: DO_MYSQL_URL_STAGING_WITH_PORT
+          mysql_db_password_env_variable: DO_MYSQL_PASSWORD_STAGING
+          requires:
+            - build
+      - deploy:
+          name: deploy-production
+          kubeconfig-env-var: PRODUCTION_KUBE_CONFIG
+          app-profile: production
+          context:
+          namespace: monitoring
+          alertmanager-yml: "alertmanager/am-production.yml"
+          alert-manager-pod-volume: "4Gi"
+          prometheus-server-pod-volume: "8Gi"
+          grafana-server-pod-volume: "2Gi"
+          data-retention-period: "15d"
+          prometheus-replicas: "1"
+          alert-manager-replicas: "1"
+          mysql_url_env_variable: DO_MYSQL_URL_PRODUCTION_WITH_PORT
+          mysql_db_password_env_variable: DO_MYSQL_PASSWORD_PRODUCTION
+          requires:
+            - build
+            - approve-prod-deploy
