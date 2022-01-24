@@ -34,6 +34,8 @@ jobs:
         type: string
       data-retention-period:
         type: string
+      data-retention-size:
+        type: string
       prometheus-replicas:
         type: string
       alert-manager-replicas:
@@ -59,6 +61,7 @@ jobs:
             echo "export ALERT_MANAGER_POD_VOLUME=<< parameters.alert-manager-pod-volume >>" >> $BASH_ENV
             echo "export GRAFANA_POD_VOLUME=<< parameters.grafana-server-pod-volume >>" >> $BASH_ENV
             echo "export DATA_RETENTIONS_PERIOD=<< parameters.data-retention-period >>" >> $BASH_ENV
+            echo "export DATA_RETENTIONS_SIZE=<< parameters.data-retention-size >>" >> $BASH_ENV
             echo "export PROMETHEUS_SERVER_REPLICAS=<< parameters.prometheus-replicas >>" >> $BASH_ENV
             echo "export ALERT_MANAGER_REPLICAS=<< parameters.alert-manager-replicas >>" >> $BASH_ENV
             echo "export DO_MYSQL_DB_PASSWORD=$<< parameters.mysql_db_password_env_variable >>" >> $BASH_ENV
@@ -87,6 +90,7 @@ workflows:
           prometheus-server-pod-volume: "1Gi"
           grafana-server-pod-volume: "1Gi"
           data-retention-period: "5d"
+          data-retention-size: "500MB"
           prometheus-replicas: "1"
           alert-manager-replicas: "1"
           mysql_url_env_variable: DO_MYSQL_URL_STAGING_WITH_PORT
@@ -104,6 +108,7 @@ workflows:
           prometheus-server-pod-volume: "8Gi"
           grafana-server-pod-volume: "2Gi"
           data-retention-period: "15d"
+          data-retention-size: "6GB"
           prometheus-replicas: "1"
           alert-manager-replicas: "1"
           mysql_url_env_variable: DO_MYSQL_URL_PRODUCTION_WITH_PORT
